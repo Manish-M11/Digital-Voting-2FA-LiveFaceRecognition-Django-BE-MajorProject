@@ -21,6 +21,82 @@ from django.core.files.storage import FileSystemStorage
 import itertools
 
 # Create your views here.
+import face_recognition
+import cv2
+import os
+import glob
+import numpy as np
+
+
+class SimpleFacerec:
+    def __init__(self):
+        self.known_face_encodings = []
+        self.known_face_names = []
+
+        # Resize frame for a faster speed
+        self.frame_resizing = 0.25
+
+    def load_encoding_images(self, images_path):
+        """
+        Load encoding images from path
+        :param images_path:
+        :return:
+        """
+        # Load Images
+        images_path = glob.glob(os.path.join(images_path, "*.*"))
+
+        print("{} encoding images found.".format(len(images_path)))
+
+        # Store image encoding and names
+        for img_path in images_path:
+            img = cv2.imread(img_path)
+            rgb_img = cv2.cvtColor(img, cv2.COLOR_BGR2RGB)
+
+            # Get the filename only from the initial file path.
+            basename = os.path.basename(img_path)
+            (filename, ext) = os.path.splitext(basename)
+            # Get encoding
+            img_encoding = face_recognition.face_encodings(rgb_img)[0]
+
+            # Store file name and file encoding
+            self.known_face_encodings.append(img_encoding)
+            self.known_face_names.append(filename)
+        print("Encoding images loaded")
+
+    def detect_known_faces(self, frame):
+        small_frame = cv2.resize(
+            frame, (0, 0), fx=self.frame_resizing, fy=self.frame_resizing)
+        # Find all the faces and face encodings in the current frame of video
+        # Convert the image from BGR color (which OpenCV uses) to RGB color (which face_recognition uses)
+        rgb_small_frame = cv2.cvtColor(small_frame, cv2.COLOR_BGR2RGB)
+        face_locations = face_recognition.face_locations(rgb_small_frame)
+        face_encodings = face_recognition.face_encodings(
+            rgb_small_frame, face_locations)
+
+        face_names = []
+        for face_encoding in face_encodings:
+            # See if the face is a match for the known face(s)
+            matches = face_recognition.compare_faces(
+                self.known_face_encodings, face_encoding)
+            name = "Unknown"
+
+            # # If a match was found in known_face_encodings, just use the first one.
+            # if True in matches:
+            #     first_match_index = matches.index(True)
+            #     name = known_face_names[first_match_index]
+
+            # Or instead, use the known face with the smallest distance to the new face
+            face_distances = face_recognition.face_distance(
+                self.known_face_encodings, face_encoding)
+            best_match_index = np.argmin(face_distances)
+            if matches[best_match_index]:
+                name = self.known_face_names[best_match_index]
+            face_names.append(name)
+
+        # Convert to numpy array to adjust coordinates with frame resizing quickly
+        face_locations = np.array(face_locations)
+        face_locations = face_locations / self.frame_resizing
+        return face_locations.astype(int), face_names
 
 
 def register_vid(request):
@@ -33,7 +109,7 @@ def register_vid(request):
             if Voters.objects.filter(voterid_no=voterid):
                 register_vid.v = Voters.objects.get(voterid_no=voterid)
                 user_phone = str(register_vid.v.mobile_no)
-                url = "http://2factor.in/API/V1/42d7c67d-52c1-11ed-9c12-0200cd936042/SMS/" + \
+                url = "http://2factor.in/API/V1/a8e15c6b-a550-11ed-813b-0200cd936042/SMS/" + \
                     user_phone + "/AUTOGEN"
                 response = requests.request("GET", url)
                 data = response.json()
@@ -50,7 +126,7 @@ def register_vid(request):
 def otp(request):
     if (request.method == "POST"):
         userotp = request.POST['otp']
-        url = "http://2factor.in/API/V1/42d7c67d-52c1-11ed-9c12-0200cd936042/SMS/VERIFY/" + request.session[
+        url = "http://2factor.in/API/V1/a8e15c6b-a550-11ed-813b-0200cd936042/SMS/VERIFY/" + request.session[
             'otp_session_data'] + "/" + userotp
         response = requests.request("GET", url)
         data = response.json()
@@ -314,70 +390,111 @@ def vote(request):
         v_id = request.session['v_id']
         vote.v = Voted.objects.get(
             election_id=velection.e.election_id, voter_id=v_id)
+
+        print(vote.v)
+
         if vote.v.has_voted == 'no':
             vidofv = Voters.objects.get(voterid_no=v_id)
-            detectuserid = str(vidofv.id)
-            vidfile = request.FILES['vidfile']
-            folder = BASE_DIR+"/VotingDSVideo/"
+            detectuserid = str(vidofv.id)  # vidofv = voter id
+            # vidfile = request.FILES['vidfile']  # to change
+            sfr = SimpleFacerec()
+            sfr.load_encoding_images("media\VoterImage")
+
+            folder = BASE_DIR+"/VotingDSVideo/"  # to change
             fs = FileSystemStorage(location=folder)
-            vidfilename = detectuserid+vidfile.name
-            filename = fs.save(vidfilename, vidfile)
-            rec = cv2.face.LBPHFaceRecognizer_create()
-            rec.read(BASE_DIR+"/TrainingImageLabel/Trainner.yml")
-            faceDetect = cv2.CascadeClassifier(
-                BASE_DIR+"/haarcascade_frontalface_default.xml")
-            cam = cv2.VideoCapture(folder+"/"+vidfilename)
-            font = cv2.FONT_HERSHEY_SIMPLEX
+            # vidfilename = detectuserid+vidfile.name
+            # filename = fs.save(vidfilename, vidfile)
+            # rec = cv2.face.LBPHFaceRecognizer_create()  # //
+            # rec.read(BASE_DIR+"/TrainingImageLabel/Trainner.yml")  # //
+            # faceDetect = cv2.CascadeClassifier(
+            #     BASE_DIR+"/haarcascade_frontalface_default.xml")
+            # cam = cv2.VideoCapture(folder+"/"+vidfilename)  # //
+            #cap = cv2.VideoCapture(0)
+            cap = cv2.VideoCapture(0, cv2.CAP_DSHOW)
+            # font = cv2.FONT_HERSHEY_SIMPLEX
             flag = 0
             unknowncount = 0
-            while flag != 1 and unknowncount != 5:
-                ret, img = cam.read()
-                if not ret:
-                    print("no image")
-                    break
-                # print(img, ret)
-                if (img is not None):
-                    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                # print(gray, ret)
-                faces = faceDetect.detectMultiScale(gray, 1.3, 5)
-                for(x, y, w, h) in faces:
-                    cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), 2)
-                    Id, conf = rec.predict(gray[y:y+h, x:x+w])
-                    if conf < 50:
-                        if str(Id) == detectuserid:
-                            tt = "Detected"
-                            cv2.putText(img, str(tt), (x, y+h),
-                                        font, 2, (0, 255, 0), 2)
-                            cv2.waitKey(500)
-                            flag = 1
-                    else:
-                        Id = 'Unknown'
-                        unknowncount += 1
-                        tt = str(Id)
-                        cv2.putText(img, str(tt), (x, y+h),
-                                    font, 2, (0, 0, 255), 2)
-                cv2.imshow("Face", img)
-                cv2.waitKey(1000)
+            # while flag != 1 and unknowncount != 5:
+            #     ret, img = cam.read()
+            #     if not ret:
+            #         print("no image")
+            #         break
+            #     # print(img, ret)
+            #     if (img is not None):
+            #         gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
+            #     # print(gray, ret)
+            #     faces = faceDetect.detectMultiScale(gray, 1.3, 5)
+            #     for(x, y, w, h) in faces:
+            #         cv2.rectangle(img, (x, y), (x+w, y+h), (0, 255, 0), 2)
+            #         Id, conf = rec.predict(gray[y:y+h, x:x+w])
+            #         if conf < 50:  # if matched then this
+            #             if str(Id) == detectuserid:
+            #                 tt = "Detected"
+            #                 cv2.putText(img, str(tt), (x, y+h),
+            #                             font, 2, (0, 255, 0), 2)
+            #                 cv2.waitKey(500)
+            #                 flag = 1
+            #         else:
+            #             Id = 'Unknown'
+            #             unknowncount += 1
+            #             tt = str(Id)
+            #             cv2.putText(img, str(tt), (x, y+h),
+            #                         font, 2, (0, 0, 255), 2)
+            #     cv2.imshow("Face", img)
+            #     cv2.waitKey(1000)
+            #     if(cv2.waitKey(1) == ord('q')):
+            #         break
+            # cam.release()
+            # cv2.destroyAllWindows()
+            while True:
+                ret, frame = cap.read()
+
+                # Detect Faces
+                face_locations, face_names = sfr.detect_known_faces(frame)
+                # print(len(face_names))
+                for face_loc, name in zip(face_locations, face_names):
+                    y1, x2, y2, x1 = face_loc[0], face_loc[1], face_loc[2], face_loc[3]
+
+                    cv2.putText(frame, name, (x1, y1 - 10),
+                                cv2.FONT_HERSHEY_DUPLEX, 1, (0, 0, 200), 2)
+                    cv2.rectangle(frame, (x1, y1), (x2, y2), (0, 0, 200), 4)
+
+                    if face_names[0] == str(v_id):
+                        flag = 1
+                        break
+                    # else:
+                    #     Id = 'Unknown'
+                    #     unknowncount += 1
+                    #     tt = str(Id)
+
+                cv2.imshow("Frame", frame)
+
                 if(cv2.waitKey(1) == ord('q')):
                     break
-            cam.release()
+
+            cap.release()
             cv2.destroyAllWindows()
+            print(flag)
+            # flag = 1
             if flag == 1:
+
                 vote.candidateid = request.POST['can']
                 vmob = Voters.objects.get(voterid_no=v_id)
                 vmobno = str(vmob.mobile_no)
-                url = "http://2factor.in/API/V1/42d7c67d-52c1-11ed-9c12-0200cd936042/SMS/" + \
+                url = "http://2factor.in/API/V1/a8e15c6b-a550-11ed-813b-0200cd936042/SMS/" + \
                     vmobno + "/AUTOGEN"
                 response = requests.request("GET", url)
                 data = response.json()
                 request.session['otp_session_data'] = data['Details']
                 response_data = {'Message': 'Success'}
                 messages.info(
-                    request, 'an OTP has been sent to registered mobile number ending with')
+                    request, 'face matched and otp send')
                 mobno = vmobno[6:]
                 return render(request, 'voter/voteotp.html', {'mno': mobno, 'username': vhome.username, 'image': vhome.image})
+                # messages.info(request, 'Face matched')
+                # return render(request, 'voter/voteotp.html', {'username': vhome.username, 'image': vhome.image})
             else:
-                messages.info(request, 'Face not matched')
+                messages.info(request, 'Face... not matched')
                 return render(request, 'voter/votesub.html', {'username': vhome.username, 'image': vhome.image})
         else:
             messages.info(request, 'Already Voted')
@@ -388,7 +505,7 @@ def vote(request):
 def subvoteotp(request):
     if (request.method == "POST"):
         userotp = request.POST['otp']
-        url = "http://2factor.in/API/V1/42d7c67d-52c1-11ed-9c12-0200cd936042/SMS/VERIFY/" + \
+        url = "http://2factor.in/API/V1/a8e15c6b-a550-11ed-813b-0200cd936042/SMS/VERIFY/" + \
             request.session['otp_session_data'] + "/" + userotp
         response = requests.request("GET", url)
         data = response.json()
